@@ -1,0 +1,158 @@
+name: Update PassWall2 Packages
+
+on:
+  schedule:
+    # Check for new releases every 6 hours
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get upstream latest release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_JSON=$(gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest)
+          TAG=$(echo "$RELEASE_JSON" | jq -r '.tag_name')
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest release: $TAG"
+
+      - name: Get our latest release
+        id: current
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "none")
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Current release: $TAG"
+
+      - name: Check if update needed
+        id: check
+        run: |
+          if [ "${{ steps.upstream.outputs.tag }}" = "${{ steps.current.outputs.tag }}" ]; then
+            echo "update=false" >> "$GITHUB_OUTPUT"
+            echo "Already up to date"
+          else
+            echo "update=true" >> "$GITHUB_OUTPUT"
+            echo "New release available: ${{ steps.upstream.outputs.tag }}"
+          fi
+
+      - name: Download upstream release assets
+        if: steps.check.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p downloads
+          RELEASE_JSON=$(gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest)
+
+          # Download all APK-related assets
+          echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("apk|.apk$")) | .browser_download_url' | while read -r url; do
+            echo "Downloading: $(basename "$url")"
+            curl -fsSL -o "downloads/$(basename "$url")" "$url"
+          done
+
+          ls -lh downloads/
+
+      - name: Extract and organize packages
+        if: steps.check.outputs.update == 'true'
+        run: |
+          mkdir -p packages
+
+          # Extract architecture-specific ZIP archives
+          for zip in downloads/passwall_packages_apk_*.zip; do
+            [ -f "$zip" ] || continue
+            # Extract arch from filename: passwall_packages_apk_<arch>.zip
+            ARCH=$(basename "$zip" .zip | sed 's/passwall_packages_apk_//')
+            echo "Extracting packages for arch: $ARCH"
+            mkdir -p "packages/$ARCH"
+            unzip -o "$zip" -d "packages/$ARCH/"
+          done
+
+          # Copy standalone APK files (luci-app, luci-i18n) to a common 'all' directory
+          mkdir -p packages/all
+          for apk in downloads/*.apk; do
+            [ -f "$apk" ] || continue
+            cp "$apk" "packages/all/"
+          done
+
+          echo "=== Package structure ==="
+          find packages -type f -name "*.apk" | head -50
+          echo "=== Package counts per arch ==="
+          for dir in packages/*/; do
+            echo "$(basename "$dir"): $(find "$dir" -name '*.apk' | wc -l) packages"
+          done
+
+      - name: Generate repository index
+        if: steps.check.outputs.update == 'true'
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          REPO_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
+
+          # Build index of all available packages per architecture
+          {
+            echo "# PassWall2 APK Repository"
+            echo "# Version: ${TAG}"
+            echo "# Updated: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo ""
+            echo "## Available architectures:"
+            for dir in packages/*/; do
+              arch=$(basename "$dir")
+              count=$(find "$dir" -name '*.apk' | wc -l)
+              echo "- ${arch}: ${count} packages"
+            done
+            echo ""
+            echo "## Package list:"
+            find packages -name '*.apk' -printf '%P\n' | sort
+          } > packages/INDEX.md
+
+          cat packages/INDEX.md
+
+      - name: Create release with packages
+        if: steps.check.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+
+          # Collect all APK files for the release
+          ASSETS=()
+          for apk in $(find packages -name '*.apk' -type f); do
+            ASSETS+=("$apk")
+          done
+
+          # Also keep the per-arch ZIPs for bulk download
+          for zip in downloads/passwall_packages_apk_*.zip; do
+            [ -f "$zip" ] && ASSETS+=("$zip")
+          done
+
+          echo "Creating release ${TAG} with ${#ASSETS[@]} assets..."
+
+          # Get upstream release notes
+          BODY=$(gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest --jq '.body // "No release notes"')
+
+          RELEASE_NOTES="## PassWall2 ${TAG}
+
+          Automatically synced from [Openwrt-Passwall/openwrt-passwall2](https://github.com/Openwrt-Passwall/openwrt-passwall2/releases/tag/${TAG})
+
+          ### Upstream Release Notes
+          ${BODY}
+
+          ---
+          *Auto-updated by GitHub Actions*"
+
+          gh release create "$TAG" \
+            --title "PassWall2 ${TAG}" \
+            --notes "$RELEASE_NOTES" \
+            "${ASSETS[@]}"
+
+          echo "Release created: ${TAG}"
