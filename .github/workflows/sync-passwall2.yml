@@ -92,46 +92,48 @@ jobs:
             echo "$(basename "$dir"): $(find "$dir" -name '*.apk' | wc -l) packages"
           done
 
+      - name: Build apk-tools v3
+        if: steps.check.outputs.update == 'true'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq meson ninja-build libssl-dev zlib1g-dev lua5.3 liblua5.3-dev scdoc cmake git
+          git clone --depth 1 --branch v3.0.5 https://gitlab.alpinelinux.org/alpine/apk-tools.git /tmp/apk-tools
+          cd /tmp/apk-tools
+          meson setup build -Dprefix=/usr/local -Dlua=disabled -Ddocs=disabled
+          ninja -C build
+          sudo ninja -C build install
+          echo "apk-tools built:"
+          /usr/local/bin/apk --version
+
       - name: Sign packages and generate APKINDEX
         if: steps.check.outputs.update == 'true'
         run: |
           echo "${{ secrets.APK_SIGNING_KEY }}" > /tmp/passwall2-repo.rsa
           chmod 600 /tmp/passwall2-repo.rsa
 
-          # Use OpenWrt SDK container (apk-tools v3 compatible)
-          docker run --rm \
-            -v "$(pwd)/packages:/packages" \
-            -v "/tmp/passwall2-repo.rsa:/keys/passwall2-repo.rsa:ro" \
-            openwrt/sdk:aarch64_cortex-a53-24.10.0 bash -c '
-              set -e
+          for dir in packages/*/; do
+            arch=$(basename "$dir")
+            echo "=== Processing: $arch ==="
+            cd "$dir"
 
-              for dir in /packages/*/; do
-                arch=$(basename "$dir")
-                echo "=== Processing: $arch ==="
-                cd "$dir"
+            # Generate APKINDEX with apk-tools v3
+            echo "  Generating APKINDEX..."
+            /usr/local/bin/apk mkndx \
+              --output APKINDEX.tar.gz \
+              --sign /tmp/passwall2-repo.rsa \
+              --description "PassWall2 packages for $arch" \
+              *.apk 2>&1 || /usr/local/bin/apk index \
+              --output APKINDEX.tar.gz \
+              *.apk 2>&1
 
-                # Generate and sign APKINDEX
-                echo "  Generating APKINDEX..."
-                apk mkndx --output APKINDEX.tar.gz \
-                  --sign /keys/passwall2-repo.rsa \
-                  --description "PassWall2 packages for $arch" \
-                  *.apk && echo "  APKINDEX.tar.gz created" || {
-                    echo "  Trying apk index fallback..."
-                    apk index --output APKINDEX.tar.gz *.apk
-                    echo "  APKINDEX.tar.gz created (unsigned)"
-                  }
-
-                ls -la APKINDEX.tar.gz
-                cd /
-              done
-
-              echo "=== Verify ==="
-              find /packages -name "APKINDEX.tar.gz" -exec ls -la {} \;
-            '
+            ls -la APKINDEX.tar.gz
+            echo "  Done: $arch"
+            cd "$GITHUB_WORKSPACE"
+          done
 
           rm -f /tmp/passwall2-repo.rsa
 
-          echo "=== Local verification ==="
+          echo "=== Verification ==="
           find packages -name "APKINDEX.tar.gz" -exec ls -la {} \;
 
       - name: Deploy APK repository to gh-pages
