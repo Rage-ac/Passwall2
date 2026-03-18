@@ -1,0 +1,3 @@
+# Never commit private keys
+*.rsa
+!*.rsa.pub

@@ -71,7 +71,6 @@ jobs:
           # Extract architecture-specific ZIP archives
           for zip in downloads/passwall_packages_apk_*.zip; do
             [ -f "$zip" ] || continue
-            # Extract arch from filename: passwall_packages_apk_<arch>.zip
             ARCH=$(basename "$zip" .zip | sed 's/passwall_packages_apk_//')
             echo "Extracting packages for arch: $ARCH"
             mkdir -p "packages/$ARCH"
@@ -85,20 +84,45 @@ jobs:
             cp "$apk" "packages/all/"
           done
 
-          echo "=== Package structure ==="
-          find packages -type f -name "*.apk" | head -50
           echo "=== Package counts per arch ==="
           for dir in packages/*/; do
             echo "$(basename "$dir"): $(find "$dir" -name '*.apk' | wc -l) packages"
           done
 
+      - name: Sign APK packages
+        if: steps.check.outputs.update == 'true'
+        run: |
+          # Write private key from secret
+          echo "${{ secrets.APK_SIGNING_KEY }}" > /tmp/passwall2-repo.rsa
+          chmod 600 /tmp/passwall2-repo.rsa
+
+          # Use Alpine container with abuild-sign for correct APK signing
+          docker run --rm \
+            -v "$(pwd)/packages:/packages" \
+            -v "/tmp/passwall2-repo.rsa:/keys/passwall2-repo.rsa:ro" \
+            alpine:latest sh -c '
+              apk add --no-cache abuild > /dev/null 2>&1
+              SIGNED=0
+              FAILED=0
+              for apk in $(find /packages -name "*.apk" -type f); do
+                if abuild-sign -k /keys/passwall2-repo.rsa "$apk" 2>/dev/null; then
+                  SIGNED=$((SIGNED + 1))
+                else
+                  echo "WARNING: Failed to sign $(basename "$apk")"
+                  FAILED=$((FAILED + 1))
+                fi
+              done
+              echo "Signed: $SIGNED, Failed: $FAILED"
+            '
+
+          rm -f /tmp/passwall2-repo.rsa
+          echo "Signing complete"
+
       - name: Generate repository index
         if: steps.check.outputs.update == 'true'
         run: |
           TAG="${{ steps.upstream.outputs.tag }}"
-          REPO_URL="https://github.com/${{ github.repository }}/releases/download/${TAG}"
 
-          # Build index of all available packages per architecture
           {
             echo "# PassWall2 APK Repository"
             echo "# Version: ${TAG}"
@@ -140,19 +164,22 @@ jobs:
           # Get upstream release notes
           BODY=$(gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest --jq '.body // "No release notes"')
 
-          RELEASE_NOTES="## PassWall2 ${TAG}
-
-          Automatically synced from [Openwrt-Passwall/openwrt-passwall2](https://github.com/Openwrt-Passwall/openwrt-passwall2/releases/tag/${TAG})
-
-          ### Upstream Release Notes
-          ${BODY}
-
-          ---
-          *Auto-updated by GitHub Actions*"
-
           gh release create "$TAG" \
             --title "PassWall2 ${TAG}" \
-            --notes "$RELEASE_NOTES" \
+            --notes "$(cat <<EOF
+## PassWall2 ${TAG}
+
+Automatically synced from [Openwrt-Passwall/openwrt-passwall2](https://github.com/Openwrt-Passwall/openwrt-passwall2/releases/tag/${TAG})
+
+All packages are signed with the repository key.
+
+### Upstream Release Notes
+${BODY}
+
+---
+*Auto-updated by GitHub Actions*
+EOF
+          )" \
             "${ASSETS[@]}"
 
           echo "Release created: ${TAG}"
