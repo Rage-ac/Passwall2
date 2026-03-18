@@ -98,12 +98,12 @@ jobs:
           echo "${{ secrets.APK_SIGNING_KEY }}" > /tmp/passwall2-repo.rsa
           chmod 600 /tmp/passwall2-repo.rsa
 
-          # Sign all packages and generate APKINDEX.tar.gz per arch
           docker run --rm \
             -v "$(pwd)/packages:/packages" \
             -v "/tmp/passwall2-repo.rsa:/keys/passwall2-repo.rsa:ro" \
             alpine:latest sh -c '
-              apk add --no-cache abuild alpine-sdk > /dev/null 2>&1
+              set -e
+              apk add --no-cache abuild alpine-sdk
 
               for dir in /packages/*/; do
                 arch=$(basename "$dir")
@@ -111,32 +111,45 @@ jobs:
 
                 # Sign all .apk files
                 SIGNED=0
-                for apk in "$dir"*.apk; do
-                  [ -f "$apk" ] || continue
-                  if abuild-sign -k /keys/passwall2-repo.rsa "$apk" 2>/dev/null; then
-                    SIGNED=$((SIGNED + 1))
-                  else
-                    echo "  WARNING: Failed to sign $(basename "$apk")"
-                  fi
+                for f in "$dir"*.apk; do
+                  [ -f "$f" ] || continue
+                  abuild-sign -k /keys/passwall2-repo.rsa "$f" && SIGNED=$((SIGNED + 1)) || echo "  WARN: failed to sign $(basename "$f")"
                 done
                 echo "  Signed: $SIGNED packages"
 
                 # Generate APKINDEX.tar.gz
                 cd "$dir"
-                apk index -o APKINDEX.tar.gz *.apk 2>/dev/null
-                abuild-sign -k /keys/passwall2-repo.rsa APKINDEX.tar.gz 2>/dev/null
+                echo "  Generating APKINDEX..."
+                apk index --output APKINDEX.tar.gz *.apk
+                echo "  APKINDEX size: $(stat -c%s APKINDEX.tar.gz) bytes"
+                abuild-sign -k /keys/passwall2-repo.rsa APKINDEX.tar.gz
                 echo "  APKINDEX.tar.gz created and signed"
+                ls -la APKINDEX.tar.gz
                 cd /
               done
+
+              echo "=== Verify APKINDEX files ==="
+              find /packages -name "APKINDEX.tar.gz" -exec ls -la {} \;
             '
 
           rm -f /tmp/passwall2-repo.rsa
-          echo "Signing and indexing complete"
+
+          # Verify APKINDEX files exist locally
+          echo "=== Local verification ==="
+          find packages -name "APKINDEX.tar.gz" -exec ls -la {} \;
 
       - name: Deploy APK repository to gh-pages
         if: steps.check.outputs.update == 'true'
         run: |
           TAG="${{ steps.upstream.outputs.tag }}"
+
+          # Verify APKINDEX files before deploy
+          INDEX_COUNT=$(find packages -name "APKINDEX.tar.gz" | wc -l)
+          echo "Found $INDEX_COUNT APKINDEX.tar.gz files"
+          if [ "$INDEX_COUNT" -eq 0 ]; then
+            echo "ERROR: No APKINDEX.tar.gz files found!"
+            exit 1
+          fi
 
           # Prepare gh-pages content
           mkdir -p deploy/packages
