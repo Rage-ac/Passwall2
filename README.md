@@ -17,7 +17,7 @@ GitHub Actions checks for new upstream releases every 6 hours. When a new versio
 
 ```sh
 wget -O /etc/apk/keys/passwall2-repo.rsa.pub \
-  https://raw.githubusercontent.com/Rage-ac/Passwall2-repository/main/keys/passwall2-repo.rsa.pub
+  https://rage-ac.github.io/Passwall2/keys/passwall2-repo.rsa.pub
 ```
 
 ### Step 2: Install packages
@@ -31,8 +31,8 @@ apk add luci-app-passwall2-*.apk
 Or download the full architecture ZIP:
 
 ```sh
-wget https://github.com/Rage-ac/Passwall2-repository/releases/latest/download/passwall_packages_apk_aarch64_generic.zip
-unzip passwall_packages_apk_aarch64_generic.zip
+wget https://github.com/Rage-ac/Passwall2/releases/latest/download/passwall2_signed_apk_aarch64_generic.zip
+unzip passwall2_signed_apk_aarch64_generic.zip
 apk add *.apk
 ```
 
