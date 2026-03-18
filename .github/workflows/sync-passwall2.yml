@@ -117,14 +117,13 @@ jobs:
             echo "=== Processing: $arch ==="
             cd "$dir"
 
-            # Generate APKINDEX with apk-tools v3
+            # Generate APKINDEX with apk-tools v3 (--allow-untrusted for upstream-signed packages)
             echo "  Generating APKINDEX..."
             /usr/local/bin/apk mkndx \
+              --allow-untrusted \
               --output APKINDEX.tar.gz \
               --sign /tmp/passwall2-repo.rsa \
               --description "PassWall2 packages for $arch" \
-              *.apk 2>&1 || /usr/local/bin/apk index \
-              --output APKINDEX.tar.gz \
               *.apk 2>&1
 
             ls -la APKINDEX.tar.gz
