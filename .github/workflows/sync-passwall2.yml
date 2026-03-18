@@ -79,14 +79,27 @@ jobs:
             unzip -o "$zip" -d "packages/$ARCH/"
           done
 
-          # Copy standalone APK files (luci-app, luci-i18n) to each arch directory AND noarch
+          # noarch directory: standalone APK files (luci-app, luci-i18n)
+          # apk fetches noarch packages from <repo>/noarch/
           mkdir -p packages/noarch
           for apk in downloads/*.apk; do
             [ -f "$apk" ] || continue
             cp "$apk" "packages/noarch/"
-            for dir in packages/*/; do
-              [ "$(basename "$dir")" = "noarch" ] && continue
+          done
+
+          # Also copy standalone APKs into each arch directory
+          # AND copy all arch-specific packages into noarch (some deps may resolve there)
+          for dir in packages/*/; do
+            [ "$(basename "$dir")" = "noarch" ] && continue
+            # Add standalone apks to arch dirs
+            for apk in downloads/*.apk; do
+              [ -f "$apk" ] || continue
               cp "$apk" "$dir"
+            done
+            # Add arch-specific packages to noarch
+            for apk in "$dir"*.apk; do
+              [ -f "$apk" ] || continue
+              cp -n "$apk" "packages/noarch/" 2>/dev/null
             done
           done
 
