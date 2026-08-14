@@ -19,11 +19,12 @@ trap 'rm -rf "$WORK"' EXIT
 upstream_json() {
 	local tag=$1 count=$2 age_h=$3 published
 	published=$(date -u -d "@$((NOW - age_h * 3600))" +%Y-%m-%dT%H:%M:%SZ)
+	# Object values are parenthesised: jq 1.7 (what CI ships) rejects a bare "+" there.
 	jq -n --arg tag "$tag" --arg published "$published" --argjson count "$count" '{
 		tag_name: $tag,
 		published_at: $published,
-		assets: [{name: ("luci-app-passwall2-" + $tag + ".apk")}]
-			+ [range(0; $count) | {name: ("passwall_packages_apk_arch" + tostring + ".zip")}]
+		assets: ([{name: ("luci-app-passwall2-" + $tag + ".apk")}]
+			+ [range(0; $count) | {name: ("passwall_packages_apk_arch" + tostring + ".zip")}])
 	}' > "$WORK/upstream.json"
 	echo "$WORK/upstream.json"
 }
@@ -36,8 +37,8 @@ current_json() {
 	else
 		jq -n --arg tag "$tag" --argjson count "$count" '{
 			tag_name: $tag,
-			assets: [{name: "passwall2_signed_apk_noarch.zip"}]
-				+ [range(0; $count) | {name: ("passwall2_signed_apk_arch" + tostring + ".zip")}]
+			assets: ([{name: "passwall2_signed_apk_noarch.zip"}]
+				+ [range(0; $count) | {name: ("passwall2_signed_apk_arch" + tostring + ".zip")}])
 		}' > "$WORK/current.json"
 	fi
 	echo "$WORK/current.json"
@@ -48,8 +49,8 @@ manifest_json() {
 	local tag=$1 fresh=$2 published=$3
 	jq -n --arg tag "$tag" --argjson fresh "$fresh" --argjson published "$published" '{
 		tag: $tag,
-		fresh: [range(0; $fresh) | "arch" + tostring],
-		arches: [range(0; $published) | "arch" + tostring] + ["noarch"]
+		fresh: [range(0; $fresh) | ("arch" + tostring)],
+		arches: ([range(0; $published) | ("arch" + tostring)] + ["noarch"])
 	}' > "$WORK/manifest.json"
 	echo "$WORK/manifest.json"
 }
