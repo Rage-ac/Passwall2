@@ -1,0 +1,27 @@
+name: Tests
+
+on:
+  push:
+    paths:
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/**"
+  pull_request:
+    paths:
+      - "scripts/**"
+      - "tests/**"
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Run test suites
+        run: bash tests/run-tests.sh
+
+      - name: Lint shell scripts
+        run: shellcheck --severity=error scripts/*.sh tests/*.sh

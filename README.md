@@ -16,8 +16,16 @@ GitHub Actions checks for new upstream releases every 6 hours. When a new versio
 1. All APK packages and per-architecture ZIP archives are downloaded
 2. Packages are signed with the repository RSA key
 3. `APKINDEX.tar.gz` is generated and signed for each architecture
-4. APK repository is deployed to GitHub Pages
-5. A GitHub Release is created with per-arch ZIP archives
+4. The generated tree is verified (every expected architecture present, every index intact)
+5. APK repository is deployed to GitHub Pages and the live site is smoke tested
+6. A GitHub Release is created with per-arch ZIP archives
+
+Upstream publishes a release in stages, so a build is deferred while upstream ships fewer
+architectures than we already provide, and any architecture that is still missing is carried
+over from the previous release. That way the published repository never loses an architecture
+mid-upload, which would make `apk update` answer `HTTP 404: Not Found` for the affected routers.
+
+Every deployment is also checked with a real apk-tools v3 client before and after publishing.
 
 ## Technical requirements
 
@@ -51,7 +59,7 @@ GitHub Actions checks for new upstream releases every 6 hours. When a new versio
 - Single-command installation via `apk`
 - Automatic package updates every 6 hours from upstream
 - All packages are signed with a repository RSA key
-- 16+ supported architectures (ARM, ARM64, MIPS, x86_64)
+- 13 supported architectures (ARM, ARM64, MIPS, x86_64) — whatever upstream publishes
 - Kill switch functionality
 - TLS fragmentation support
 - WARP connection support
@@ -124,25 +132,50 @@ openssl pkey -pubin -in /tmp/passwall2-repo.rsa.pub -outform DER | sha256sum
 
 ## Supported architectures
 
+The set follows upstream — these are the architectures currently published:
+
 | Architecture | Devices |
 |---|---|
 | `aarch64_cortex-a53` | Raspberry Pi 3/4, many ARM routers |
 | `aarch64_cortex-a72` | Raspberry Pi 4/5 |
 | `aarch64_generic` | Generic ARM64 |
-| `arm_cortex-a5_vfpv4` | Some ARM routers |
 | `arm_cortex-a7` | Many budget ARM routers |
 | `arm_cortex-a7_neon-vfpv4` | ARM routers with NEON |
 | `arm_cortex-a8_vfpv3` | TI OMAP3 / Beagle series |
 | `arm_cortex-a9` | Older ARM routers |
-| `arm_cortex-a9_neon` | ARM routers with NEON |
-| `arm_cortex-a9_vfpv3-d16` | Marvell Armada 370/XP |
 | `arm_cortex-a15_neon-vfpv4` | Marvell Armada 38x |
 | `mips_24kc` | MediaTek MT7621 and similar |
-| `mips_4kec` | Older Atheros |
 | `mips_mips32` | Generic MIPS |
-| `mipsel_74kc` | Broadcom BCM47xx |
+| `mipsel_24kc` | MediaTek little-endian |
 | `mipsel_mips32` | Generic MIPS little-endian |
 | `x86_64` | x86 PCs / virtual machines |
+| `noarch` | Architecture-independent packages (`luci-app`, translations) |
+
+## Development
+
+The workflow logic lives in [`scripts/`](scripts) and is covered by tests:
+
+```sh
+./tests/run-tests.sh                 # gate logic, repository verification, workflow wiring
+
+# check the live repository the way apk sees it
+./scripts/verify-repo.sh --url https://rage-ac.github.io/Passwall2/packages \
+  --expect aarch64_generic,arm_cortex-a7_neon-vfpv4,noarch
+
+# end-to-end with a real apk-tools v3 client (downloads apk.static, Linux only)
+./scripts/apk-smoke-test.sh --url https://rage-ac.github.io/Passwall2/packages \
+  --arch arm_cortex-a7_neon-vfpv4
+```
+
+Troubleshooting `apk update` against this repository:
+
+| Message | Cause |
+|---|---|
+| `HTTP 404: Not Found` | the architecture is not published — check `/etc/apk/arch` and the [supported list](#supported-architectures) |
+| `UNTRUSTED signature` | the signing key is not in `/etc/apk/keys/` |
+| `unexpected end of file` | the index download was interrupted or is corrupt — retry, or `apk update --no-cache` |
+
+Tests run in CI on every push, and a daily workflow re-checks the published repository.
 
 ## Upstream
 

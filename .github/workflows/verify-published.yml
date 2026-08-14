@@ -1,0 +1,55 @@
+name: Verify Published Repository
+
+# Independent watchdog for the live apk repository. The sync workflow verifies what it deploys,
+# this one keeps checking what users actually download — with a real apk-tools v3 client — so a
+# broken repository is noticed here rather than in an issue (see issues #3 and #5).
+
+on:
+  schedule:
+    - cron: "30 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Collect expected architectures from the latest release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api repos/${{ github.repository }}/releases/latest \
+            --jq '.assets[].name | select(startswith("passwall2_signed_apk_") and endswith(".zip"))' \
+            | sed 's/^passwall2_signed_apk_//; s/\.zip$//' > expected-arches.txt
+          echo noarch >> expected-arches.txt
+          sort -u -o expected-arches.txt expected-arches.txt
+          echo "Expected architectures:"
+          tr '\n' ' ' < expected-arches.txt; echo
+
+      - name: Verify live repository
+        run: |
+          bash ./scripts/verify-repo.sh \
+            --url "https://rage-ac.github.io/Passwall2/packages" \
+            --expect "@expected-arches.txt" --min-arch 10
+
+      - name: Install packages with a real apk client
+        run: |
+          # Two architectures per run: one arch-specific and the shared noarch feed.
+          ARCH=$(grep -v '^noarch$' expected-arches.txt | head -1)
+          bash ./scripts/apk-smoke-test.sh \
+            --url "https://rage-ac.github.io/Passwall2/packages" --arch "$ARCH"
+          bash ./scripts/apk-smoke-test.sh \
+            --url "https://rage-ac.github.io/Passwall2/packages" --arch noarch
+
+      - name: Verify signing key is served
+        run: |
+          curl -fsSL --retry 3 -o /tmp/repo-key.pub \
+            "https://rage-ac.github.io/Passwall2/keys/passwall2-repo.rsa.pub"
+          diff /tmp/repo-key.pub keys/passwall2-repo.rsa.pub
+          echo "Published signing key matches the one in the repository"

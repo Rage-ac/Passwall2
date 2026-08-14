@@ -53,59 +53,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Fetch upstream and current release metadata
-          upstream_json=$(gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest)
-          upstream_tag=$(echo "$upstream_json" | jq -r '.tag_name')
-          current_json=$(gh api repos/${{ github.repository }}/releases/latest 2>/dev/null || echo '{}')
-          current_tag=$(echo "$current_json" | jq -r '.tag_name // "none"')
+          # Fetch upstream and current release metadata. The decision itself lives in
+          # scripts/check-update.sh so it can be unit tested (see tests/test-check-update.sh).
+          gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest > upstream-release.json
+          gh api repos/${{ github.repository }}/releases/latest > current-release.json 2>/dev/null \
+            || echo '{}' > current-release.json
 
-          echo "Upstream tag: $upstream_tag"
-          echo "Current tag: $current_tag"
+          # The manifest of the currently published site tells which architectures were really
+          # built from the current tag, as opposed to carried over from an earlier release.
+          curl -fsSL --retry 3 -o published-manifest.json \
+            "https://rage-ac.github.io/Passwall2/packages/manifest.json" \
+            || echo "No published manifest (first deployment or older site)"
 
-          # If we have no current release, update
-          if [ "$current_tag" = "none" ]; then
-            echo "update=true" >> "$GITHUB_OUTPUT"
-            echo "No current release present; will update"
-            exit 0
-          fi
-
-          # Count upstream per-arch zips and our per-arch signed zips (excluding the synthesized _noarch one).
-          # Upstream ships one passwall_packages_apk_<arch>.zip per architecture.
-          # Our release ships one passwall2_signed_apk_<arch>.zip per architecture plus a _noarch.zip we synthesize.
-          upstream_arch_count=$(echo "$upstream_json" \
-            | jq '[.assets[] | select((.name | startswith("passwall_packages_apk_")) and (.name | endswith(".zip")))] | length')
-          current_arch_count=$(echo "$current_json" \
-            | jq '[.assets[] | select((.name | startswith("passwall2_signed_apk_")) and (.name | endswith(".zip")) and ((.name | endswith("_noarch.zip")) | not))] | length')
-
-          echo "Upstream per-arch zips: $upstream_arch_count, Current per-arch signed zips: $current_arch_count"
-
-          # Stability gate. Upstream uploads assets in stages (standalone .apk files first, then per-arch zips
-          # over the next few hours). Past releases consistently shipped 16+ arch zips, so if upstream has fewer
-          # than this threshold we treat the upstream release as still in progress and defer the build to avoid
-          # publishing a defective release with only the noarch zip.
-          MIN_ARCH=10
-
-          if [ "$upstream_tag" != "$current_tag" ]; then
-            if [ "$upstream_arch_count" -lt "$MIN_ARCH" ]; then
-              echo "Deferring new release $upstream_tag; upstream has only $upstream_arch_count arch zips (< $MIN_ARCH)"
-              echo "update=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            echo "Tag changed: $upstream_tag (was $current_tag); will update"
-            echo "update=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          # Same tag, catch-up case: rebuild when upstream has more arch zips than our last build picked up
-          # (covers the original klim123123 scenario where upstream finishes uploading after our cron tick).
-          if [ "$upstream_arch_count" -gt "$current_arch_count" ]; then
-            echo "Upstream grew under same tag: $upstream_arch_count vs current $current_arch_count; will update"
-            echo "update=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "update=false" >> "$GITHUB_OUTPUT"
-          echo "Already up to date"
+          bash ./scripts/check-update.sh \
+            --upstream upstream-release.json \
+            --current current-release.json \
+            --manifest published-manifest.json >> "$GITHUB_OUTPUT"
 
       - name: Download upstream release assets
         if: steps.check.outputs.update == 'true'
@@ -125,8 +88,11 @@ jobs:
 
       - name: Extract and organize packages
         if: steps.check.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p packages
+          : > fresh-arches.txt
 
           # Extract architecture-specific ZIP archives
           for zip in downloads/passwall_packages_apk_*.zip; do
@@ -135,7 +101,44 @@ jobs:
             echo "Extracting packages for arch: $ARCH"
             mkdir -p "packages/$ARCH"
             unzip -o "$zip" -d "packages/$ARCH/"
+            echo "$ARCH" >> fresh-arches.txt
           done
+
+          # Carry over architectures upstream has not published for this build from our previous
+          # release. The Pages deployment replaces the whole site, so an architecture missing from
+          # this build would otherwise disappear from the repository until upstream catches up
+          # (issue #5). Carried-over architectures stay in the release assets as well, so the next
+          # run always has a source to carry them over from; manifest.json records which of them
+          # were actually built from the current tag.
+          PREV_TAG=$(gh api repos/${{ github.repository }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+          : > prev-assets.txt
+          if [ -n "$PREV_TAG" ]; then
+            gh release view "$PREV_TAG" --repo "${{ github.repository }}" --json assets \
+              --jq '.assets[].name' > prev-assets.txt 2>/dev/null || : > prev-assets.txt
+          fi
+
+          # Which architectures to carry over, and which ones the deployment must end up with
+          # (see tests/test-plan-carryover.sh).
+          bash ./scripts/plan-carryover.sh \
+            --fresh fresh-arches.txt \
+            --previous prev-assets.txt \
+            --expected-out expected-arches.txt > carryover-plan.txt
+
+          while read -r arch asset; do
+            [ -n "$arch" ] || continue
+            echo "Carrying over arch $arch from previous release $PREV_TAG"
+            if gh release download "$PREV_TAG" --repo "${{ github.repository }}" \
+                 --pattern "$asset" --dir carryover --clobber; then
+              mkdir -p "packages/$arch"
+              unzip -o "carryover/$asset" -d "packages/$arch/"
+            else
+              echo "WARNING: could not download $asset; $arch will be missing from this deployment"
+            fi
+          done < carryover-plan.txt
+          rm -rf carryover prev-assets.txt
+
+          echo "=== Expected architectures ==="
+          tr '\n' ' ' < expected-arches.txt; echo
 
           # noarch directory: standalone APK files (luci-app, luci-i18n)
           mkdir -p packages/noarch
@@ -221,6 +224,20 @@ jobs:
           mkdir -p _site/packages
           cp -r packages/* _site/packages/
 
+          # Manifest of what this deployment serves. "fresh" are the architectures built from this
+          # upstream tag, "arches" is everything published (including carried-over architectures).
+          # The next run reads it back over HTTP to tell the two apart.
+          find _site/packages -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort > site-arches.txt
+          jq -n --arg tag "$TAG" \
+                --arg generated "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                --rawfile fresh fresh-arches.txt \
+                --rawfile arches site-arches.txt \
+            '{tag: $tag, generated: $generated,
+              fresh: ($fresh | split("\n") | map(select(length > 0)) | sort),
+              arches: ($arches | split("\n") | map(select(length > 0)))}' \
+            > _site/packages/manifest.json
+          cat _site/packages/manifest.json
+
           # Copy public key
           mkdir -p _site/keys
           cp keys/passwall2-repo.rsa.pub _site/keys/
@@ -229,6 +246,15 @@ jobs:
           du -sh _site/
           find _site -name "APKINDEX.tar.gz" | wc -l
           ls _site/packages/
+
+      - name: Verify repository before deploying
+        if: steps.check.outputs.update == 'true'
+        run: |
+          # Refuse to replace the published repository with an incomplete one: every architecture
+          # that is expected must exist, and every published index must be a non-truncated ADB
+          # index. Deploying a tree without an architecture makes apk answer "HTTP 404: Not Found"
+          # for those users (issue #3); a truncated index gives "unexpected end of file" (issue #5).
+          bash ./scripts/verify-repo.sh --dir _site/packages --expect "@expected-arches.txt" --min-arch 10
 
       - name: Upload Pages artifact
         if: steps.check.outputs.update == 'true'
@@ -248,7 +274,8 @@ jobs:
 
           ASSETS=()
 
-          # Per-arch signed ZIP archives
+          # Per-arch signed ZIP archives — everything the site publishes, including architectures
+          # carried over from the previous release, so the next run can carry them over again.
           for dir in packages/*/; do
             arch=$(basename "$dir")
             zipname="passwall2_signed_apk_${arch}.zip"
@@ -295,3 +322,19 @@ jobs:
             "${ASSETS[@]}"
 
           echo "Release created: ${TAG}"
+
+      - name: Verify published repository
+        if: steps.check.outputs.update == 'true'
+        run: |
+          # Smoke test the live site the way apk sees it. Runs last so a slow CDN cannot hold up
+          # the release; the daily verify-published workflow re-checks it independently.
+          sleep 20
+          bash ./scripts/verify-repo.sh \
+            --url "https://rage-ac.github.io/Passwall2/packages" \
+            --expect "@expected-arches.txt" --min-arch 10
+
+          # And the real thing: a genuine apk-tools v3 client set up the way the README tells
+          # users to, so index format, signature trust and package visibility are all exercised.
+          ARCH=$(head -1 fresh-arches.txt)
+          bash ./scripts/apk-smoke-test.sh \
+            --url "https://rage-ac.github.io/Passwall2/packages" --arch "$ARCH"
