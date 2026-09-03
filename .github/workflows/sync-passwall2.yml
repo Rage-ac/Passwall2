@@ -169,9 +169,25 @@ jobs:
       - name: Build apk-tools v3
         if: steps.check.outputs.update == 'true'
         run: |
+          set -euo pipefail
+
           sudo apt-get update -qq
           sudo apt-get install -y -qq meson ninja-build libssl-dev zlib1g-dev lua5.3 liblua5.3-dev scdoc cmake git
-          git clone --depth 1 --branch v3.0.5 https://gitlab.alpinelinux.org/alpine/apk-tools.git /tmp/apk-tools
+
+          # Clone from the GitHub mirror first: gitlab.alpinelinux.org sits behind an anti-bot
+          # gateway that answers 418 to CI runners, which broke every build from 2026-09-02
+          # until this changed. GitLab stays as the fallback in case the mirror lags behind.
+          APK_TAG=v3.0.5
+          for remote in https://github.com/alpinelinux/apk-tools.git \
+                        https://gitlab.alpinelinux.org/alpine/apk-tools.git; do
+            echo "Cloning apk-tools $APK_TAG from $remote"
+            if git clone --depth 1 --branch "$APK_TAG" "$remote" /tmp/apk-tools; then
+              break
+            fi
+            rm -rf /tmp/apk-tools
+          done
+          [ -d /tmp/apk-tools ] || { echo "ERROR: could not clone apk-tools $APK_TAG"; exit 1; }
+
           cd /tmp/apk-tools
           meson setup build -Dprefix=/usr/local -Dlua=disabled -Ddocs=disabled
           ninja -C build

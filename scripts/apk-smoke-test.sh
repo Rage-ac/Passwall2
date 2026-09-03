@@ -9,6 +9,7 @@
 #
 # Environment:
 #   APK_STATIC   path to an existing apk.static binary (skips the download)
+#   APK_VERSION  exact apk-tools-static version instead of the newest one published
 #
 # Byte level checks cannot tell whether apk actually accepts what we publish — index format,
 # signature trust and dependency resolution all have to work. This is the check that would have
@@ -16,12 +17,22 @@
 
 set -euo pipefail
 
-APK_VERSION="${APK_VERSION:-3.0.7-r0}"
+# The client is resolved from the mirror listing rather than pinned: Alpine moves the package
+# forward (3.0.7-r0 disappeared on 2026-09-03 and every run of this check failed on a 404).
+# APK_VERSION still allows pinning a specific build when one has to be reproduced.
+APK_VERSION="${APK_VERSION:-}"
 MIRRORS=(
-	"https://dl-cdn.alpinelinux.org/alpine/edge/main/x86_64"
-	"https://alpine.global.ssl.fastly.net/alpine/edge/main/x86_64"
-	"https://mirror.leaseweb.com/alpine/edge/main/x86_64"
+	"https://dl-cdn.alpinelinux.org/alpine"
+	"https://alpine.global.ssl.fastly.net/alpine"
+	"https://mirror.leaseweb.com/alpine"
 )
+BRANCHES=("latest-stable" "edge")
+
+# Newest apk-tools-static 3.x in an Alpine directory listing read from stdin. The 2.x builds are
+# skipped on purpose: they cannot read the ADB index that apk-tools v3 writes.
+pick_latest_static() {
+	grep -oE 'apk-tools-static-3[.][0-9]+[.][0-9]+-r[0-9]+[.]apk' | sort -u -V | tail -1
+}
 
 url=""
 arch=""
@@ -34,6 +45,8 @@ while [ $# -gt 0 ]; do
 		--url) url=${2:-}; shift 2 ;;
 		--arch) arch=${2:-}; shift 2 ;;
 		--package) package=${2:-}; shift 2 ;;
+		# Resolution helper on its own, so tests can feed it a saved listing.
+		--pick-latest) pick_latest_static; exit 0 ;;
 		-h|--help) sed -n '2,17p' "$0"; exit 0 ;;
 		*) die "unknown argument: $1" ;;
 	esac
@@ -48,11 +61,19 @@ trap 'rm -rf "$work"' EXIT
 apk_static=${APK_STATIC:-}
 if [ -z "$apk_static" ]; then
 	for mirror in "${MIRRORS[@]}"; do
-		echo "Fetching apk-tools-static-$APK_VERSION from $mirror"
-		if curl -fsSL --retry 2 --max-time 120 \
-			-o "$work/apk-tools-static.apk" "$mirror/apk-tools-static-$APK_VERSION.apk"; then
-			break
-		fi
+		for branch in "${BRANCHES[@]}"; do
+			dir="$mirror/$branch/main/x86_64"
+			if [ -n "$APK_VERSION" ]; then
+				pkg="apk-tools-static-$APK_VERSION.apk"
+			else
+				pkg=$(curl -fsSL --retry 2 --max-time 60 "$dir/" 2>/dev/null | pick_latest_static)
+				[ -n "$pkg" ] || continue
+			fi
+			echo "Fetching $pkg from $dir"
+			if curl -fsSL --retry 2 --max-time 120 -o "$work/apk-tools-static.apk" "$dir/$pkg"; then
+				break 2
+			fi
+		done
 	done
 	[ -f "$work/apk-tools-static.apk" ] || die "could not download apk-tools-static"
 	tar xzf "$work/apk-tools-static.apk" -C "$work" sbin/apk.static 2>/dev/null
