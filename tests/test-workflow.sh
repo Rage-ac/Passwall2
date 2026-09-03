@@ -80,6 +80,16 @@ assert_status "a real apk client checks the deployment" 0 $?
 grep -q 'scripts/apk-smoke-test.sh' .github/workflows/verify-published.yml
 assert_status "the daily watchdog also runs the real apk client" 0 $?
 
+# gitlab.alpinelinux.org answers 418 to CI runners, which broke every build from 2026-09-02.
+grep -q 'github.com/alpinelinux/apk-tools' "$WF"
+assert_status "apk-tools is cloned from the GitHub mirror" 0 $?
+
+if grep -A2 'for remote in' "$WF" | grep -q 'gitlab.alpinelinux.org'; then
+	pass "gitlab stays as a fallback remote"
+else
+	fail "gitlab stays as a fallback remote" "no gitlab remote in the clone loop"
+fi
+
 for script in scripts/check-update.sh scripts/verify-repo.sh scripts/plan-carryover.sh scripts/apk-smoke-test.sh; do
 	err=$(bash -n "$script" 2>&1)
 	assert_status "shell syntax: $script" 0 $? "$err"
