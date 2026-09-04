@@ -75,14 +75,21 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p downloads
-          RELEASE_JSON=$(gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest)
+          set -euo pipefail
 
-          # Download all APK-related assets
-          echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name | test("apk|.apk$")) | .browser_download_url' | while read -r url; do
-            echo "Downloading: $(basename "$url")"
-            curl -fsSL -o "downloads/$(basename "$url")" "$url"
-          done
+          mkdir -p downloads
+          gh api repos/Openwrt-Passwall/openwrt-passwall2/releases/latest             | jq -r '.assets[] | select(.name | test("apk|.apk$")) | .browser_download_url'             > asset-urls.txt
+
+          # Retry: a single 500 from GitHub used to abort the whole build and leave the mirror
+          # a release behind until the next cron tick. Reading from a file (not a pipe) keeps
+          # set -e effective, so an asset that stays unavailable fails the run instead of
+          # silently producing an incomplete build.
+          while read -r url; do
+            [ -n "$url" ] || continue
+            name=$(basename "$url")
+            echo "Downloading: $name"
+            curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --max-time 600               -o "downloads/$name" "$url"
+          done < asset-urls.txt
 
           ls -lh downloads/
 
